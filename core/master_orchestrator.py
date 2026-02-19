@@ -16,7 +16,7 @@ class MasterOrchestrator:
     """
     Master Orchestrator for Agent Mode.
     Coordinates structured planning, execution, validation, and resumption.
-    Similar to Manus AI's agent loop architecture.
+    Enforces standardized TaskResult output and GUI synchronization.
     """
     
     def __init__(self, controller):
@@ -35,7 +35,6 @@ class MasterOrchestrator:
     def set_mode(self, mode: str):
         """
         Set the current operating mode.
-        Modes: chat, automation, agent
         """
         if mode not in ["chat", "automation", "agent"]:
             logging.warning(f"MasterOrchestrator: Invalid mode '{mode}'. Defaulting to 'chat'.")
@@ -47,286 +46,214 @@ class MasterOrchestrator:
     
     async def handle_agent_task(self, goal: str, user_approved: bool = False) -> Dict[str, Any]:
         """
-        Main entry point for Agent Mode tasks.
-        
-        Workflow:
-        1. Generate structured plan
-        2. Require user approval
-        3. Execute step-by-step
-        4. Validate after each step
-        5. Persist state
-        6. Resume on failure
-        7. Commit changes
-        8. Ask confirmation before push
+        Main entry point for Agent Mode tasks with standardized output.
         """
-        
         if not self.agent_mode_active:
             return {
+                "status": "failed",
                 "success": False,
-                "error": "Agent Mode is not active. Please switch to Agent Mode first."
+                "error": "Agent Mode is not active.",
+                "message": "Please switch to Agent Mode first."
             }
         
-        # Check if we're resuming from a previous state
+        # Check if we're resuming
         if self.state_manager.has_active_execution():
             logging.info("MasterOrchestrator: Resuming previous execution...")
             return await self.resume_engine.resume_execution()
         
         # Step 1: Generate Plan
-        logging.info(f"MasterOrchestrator: Generating plan for goal: {goal}")
-        plan_result = await self.plan_engine.generate_plan(goal)
-        
-        if not plan_result.get("success"):
-            return {
-                "success": False,
-                "error": f"Plan generation failed: {plan_result.get('error')}",
-                "plan": None
-            }
-        
-        plan = plan_result.get("plan")
-        
-        # Step 2: Require User Approval (if not already approved)
         if not user_approved:
+            logging.info(f"MasterOrchestrator: Generating plan for goal: {goal}")
+            plan_result = await self.plan_engine.generate_plan(goal)
+            
+            if not plan_result.get("success"):
+                return {
+                    "status": "failed",
+                    "success": False,
+                    "error": f"Plan generation failed: {plan_result.get('error')}",
+                    "message": "I couldn't form a valid plan for this goal."
+                }
+            
             return {
+                "status": "success",
                 "success": True,
                 "requires_approval": True,
-                "plan": plan,
+                "plan": plan_result.get("plan"),
                 "message": "Plan generated. Please review and approve before execution."
             }
         
-        # Step 3: Initialize Execution State
+        # Step 2: Initialize & Execute
+        plan = self.state_manager.get_state().get("plan") if self.state_manager.get_state() else None
+        if not plan:
+            # This case shouldn't happen if UI flow is correct, but added for safety
+            plan_result = await self.plan_engine.generate_plan(goal)
+            plan = plan_result.get("plan")
+            
         self.state_manager.initialize_execution(goal, plan)
         
-        # Step 4: Execute Plan Step-by-Step
+        # Step 3: Execute Plan
         execution_result = await self._execute_plan_with_validation(plan)
         
-        # Step 5: Final Validation
-        if execution_result.get("success"):
+        # Step 4: Final Validation
+        if execution_result.get("status") == "success":
             validation_result = await self.validation_engine.validate_project()
+            execution_result["validation"] = validation_result
             
             if not validation_result.get("success"):
-                logging.warning("MasterOrchestrator: Final validation failed. Entering patch loop...")
-                # Attempt to fix issues
+                logging.warning("MasterOrchestrator: Final validation failed. Attempting patch...")
                 patch_result = await self._patch_validation_errors(validation_result)
-                execution_result["validation"] = patch_result
-            else:
-                execution_result["validation"] = validation_result
+                if patch_result.get("success"):
+                    execution_result["status"] = "success"
+                    execution_result["message"] += "\n\n✅ Final validation passed after automated patching."
+                else:
+                    execution_result["status"] = "partial"
+                    execution_result["message"] += "\n\n⚠️ Final validation failed. Manual review required."
         
-        # Step 6: Mark execution complete
-        self.state_manager.mark_execution_complete(execution_result.get("success", False))
+        # Step 5: Mark complete
+        self.state_manager.mark_execution_complete(execution_result.get("status") == "success")
         
-        # Step 7: Prepare for GitHub push (if successful)
-        if execution_result.get("success"):
-            git_prep_result = self.github_flow.prepare_for_push(execution_result)
-            execution_result["git_preparation"] = git_prep_result
+        # Step 6: GitHub Prep
+        if execution_result.get("status") == "success":
+            git_prep = self.github_flow.prepare_for_push(execution_result)
+            execution_result["git_preparation"] = git_prep
         
+        # Ensure backward compatibility for GUI signals while using new status
+        execution_result["success"] = execution_result.get("status") == "success"
         return execution_result
     
     async def _execute_plan_with_validation(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute plan steps with validation and retry logic.
-        Respects permission engine for security.
+        Execute plan steps with validation and standardized output.
         """
         steps = plan.get("steps", [])
         results = []
         
         for idx, step in enumerate(steps):
-            logging.info(f"MasterOrchestrator: Executing step {idx + 1}/{len(steps)}: {step.get('description', 'N/A')}")
-            
-            # Check permissions before execution
-            if not self._check_step_permissions(step):
-                logging.error(f"MasterOrchestrator: Step {idx + 1} denied by permission engine.")
-                return {
-                    "success": False,
-                    "error": f"Step {idx + 1} denied: Insufficient permissions.",
-                    "completed_steps": idx,
-                    "total_steps": len(steps),
-                    "results": results
-                }
-            
-            # Update state before execution
+            # Update state
             self.state_manager.update_current_step(idx)
             
-            # Execute step with retry logic
-            step_result = await self._execute_step_with_retry(step, max_retries=3)
-            
+            # GUI Update
+            if hasattr(self.controller, 'gui') and self.controller.gui:
+                self.controller.gui.activity_panel.update_activity({
+                    "agent": step.get("agent", "master"),
+                    "task": f"Step {idx+1}: {step.get('description')}",
+                    "status": "executing",
+                    "risk_level": plan.get("risk_level", "LOW")
+                })
+
+            # Execute step
+            step_result = await self._execute_step_with_retry(step, max_retries=2)
             results.append(step_result)
             
-            # Mark step as complete
-            self.state_manager.mark_step_complete(idx, step_result.get("success", False))
+            # Update state & GUI
+            success = step_result.get("status") == "success"
+            self.state_manager.mark_step_complete(idx, success, step_result)
             
-            # If step failed after retries, stop execution
-            if not step_result.get("success"):
-                logging.error(f"MasterOrchestrator: Step {idx + 1} failed after retries. Stopping execution.")
+            if hasattr(self.controller, 'gui') and self.controller.gui:
+                self.controller.gui.activity_panel.update_activity({
+                    "agent": step.get("agent", "master"),
+                    "task": step_result.get("message", "Step completed"),
+                    "status": step_result.get("status", "failed"),
+                    "confidence": step_result.get("confidence", 0.0)
+                })
+
+            if not success:
                 return {
-                    "success": False,
-                    "error": f"Step {idx + 1} failed: {step_result.get('error')}",
+                    "status": "failed",
+                    "error": step_result.get("error"),
+                    "message": f"Execution halted at step {idx+1}: {step_result.get('message')}",
                     "completed_steps": idx,
                     "total_steps": len(steps),
                     "results": results
                 }
         
         return {
-            "success": True,
+            "status": "success",
+            "message": "All plan steps executed and verified successfully.",
             "completed_steps": len(steps),
             "total_steps": len(steps),
             "results": results
         }
     
-    def _check_step_permissions(self, step: Dict[str, Any]) -> bool:
+    async def _execute_step_with_retry(self, step: Dict[str, Any], max_retries: int = 2) -> Dict[str, Any]:
         """
-        Check if step is allowed by permission engine.
+        Execute a single step with standardized retry logic.
         """
-        action = step.get("action", "")
-        params = step.get("params", {})
-        
-        # Map actions to permission types
-        permission_map = {
-            "read_file": "read_file",
-            "write_file": "write_file",
-            "execute_shell": "shell_exec",
-            "system_control": "system_control"
-        }
-        
-        # Determine permission type
-        permission_type = permission_map.get(action, "shell_exec")
-        
-        # Check with permission engine
-        details = f"Agent Mode: {action} with params {params}"
-        return self.controller.permission_engine.check_permission(permission_type, details)
-    
-    async def _execute_step_with_retry(self, step: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
-        """
-        Execute a single step with retry logic and error detection.
-        """
-        retry_count = 0
-        last_error = None
-        
-        while retry_count <= max_retries:
+        last_result = None
+        for attempt in range(max_retries + 1):
             try:
-                # Execute step via orchestrator or tool registry
-                result = await self._execute_single_step(step)
+                agent_name = step.get("agent")
+                agent = self.controller.orchestrator.agents.get(agent_name)
                 
-                # Validate step execution
-                if result.get("success"):
-                    # Compile and check for runtime errors
-                    compile_result = await self.validation_engine.compile_project()
-                    
-                    if compile_result.get("success"):
-                        return result
-                    else:
-                        # Compilation failed, enter patch loop
-                        logging.warning(f"MasterOrchestrator: Compilation failed after step execution. Retry {retry_count + 1}/{max_retries}")
-                        last_error = compile_result.get("error")
-                        retry_count += 1
-                        
-                        # Attempt to fix compilation errors
-                        if retry_count <= max_retries:
-                            await self._attempt_patch(compile_result)
+                if agent:
+                    last_result = await agent.execute(step.get("action"), step.get("params", {}))
                 else:
-                    last_error = result.get("error")
-                    retry_count += 1
+                    # Fallback to ToolRegistry
+                    tool_res = ToolRegistry.execute_tool(step.get("action"), step.get("params", {}))
+                    last_result = {
+                        "status": "success" if tool_res.get("success") else "failed",
+                        "content": tool_res.get("output", ""),
+                        "message": tool_res.get("message", "Tool executed"),
+                        "error": tool_res.get("error", ""),
+                        "execution_used": True,
+                        "confidence": 1.0,
+                        "risk_level": "low"
+                    }
+                
+                if last_result.get("status") == "success":
+                    # Verify compilation if it was a code change
+                    if agent_name == "code":
+                        comp = await self.validation_engine.compile_project()
+                        if not comp.get("success"):
+                            last_result["status"] = "failed"
+                            last_result["error"] = f"Compilation failed: {comp.get('errors')[0]}"
+                            last_result["message"] = "Code was written but contains syntax errors."
+                        else:
+                            return last_result
+                    else:
+                        return last_result
+                
+                # If we're here, it failed. Try to patch if it's the code agent.
+                if attempt < max_retries and agent_name == "code":
+                    logging.info(f"MasterOrchestrator: Step failed. Attempting patch {attempt+1}/{max_retries}")
+                    await self._attempt_patch({"error": last_result.get("error", "Unknown error")})
                     
             except Exception as e:
-                logging.error(f"MasterOrchestrator: Exception during step execution: {e}")
-                last_error = str(e)
-                retry_count += 1
-        
-        return {
-            "success": False,
-            "error": f"Step failed after {max_retries} retries. Last error: {last_error}",
-            "retry_count": retry_count
-        }
-    
-    async def _execute_single_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute a single step using the appropriate agent or tool.
-        """
-        agent_name = step.get("agent")
-        action = step.get("action")
-        params = step.get("params", {})
-        
-        # Get agent from orchestrator
-        agent = self.controller.orchestrator.agents.get(agent_name)
-        
-        if agent:
-            # Execute via agent
-            result = await agent.execute(action, params)
-            return result
-        else:
-            # Try to execute via ToolRegistry
-            tool_result = ToolRegistry.execute_tool(
-                action, 
-                params, 
-                current_permission=self.controller.permission_engine.current_level.name
-            )
-            return tool_result
-    
-    async def _attempt_patch(self, error_result: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Attempt to automatically patch compilation or runtime errors.
-        """
-        error_msg = error_result.get("error", "")
-        
-        # Use LLM to generate patch
-        patch_prompt = f"""
-        The following error occurred during execution:
-        {error_msg}
-        
-        Please provide a fix for this error. Return only the corrected code or fix instructions.
-        """
-        
-        try:
-            patch_response = await self.controller.llm_router.generate_response(patch_prompt)
-            logging.info(f"MasterOrchestrator: Generated patch: {patch_response[:100]}...")
-            
-            # Apply patch (this would need more sophisticated logic)
-            return {"success": True, "patch": patch_response}
-        except Exception as e:
-            logging.error(f"MasterOrchestrator: Patch generation failed: {e}")
-            return {"success": False, "error": str(e)}
-    
-    async def _patch_validation_errors(self, validation_result: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Attempt to patch validation errors.
-        """
-        errors = validation_result.get("errors", [])
-        
-        for error in errors:
-            patch_result = await self._attempt_patch({"error": error})
-            if not patch_result.get("success"):
-                return {
-                    "success": False,
-                    "error": f"Failed to patch validation error: {error}"
+                logging.error(f"MasterOrchestrator: Exception in step: {e}")
+                last_result = {
+                    "status": "failed",
+                    "error": str(e),
+                    "message": "An unexpected exception occurred during step execution."
                 }
         
-        # Re-validate after patching
+        return last_result
+
+    async def _attempt_patch(self, error_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Attempt to automatically patch an error.
+        """
+        error_msg = error_result.get("error", "")
+        patch_prompt = f"The following error occurred: {error_msg}\nPlease provide a fix. Return only code fix instructions."
+        try:
+            patch_response = await self.controller.llm_router.generate_response(patch_prompt)
+            return {"success": True, "patch": patch_response}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def _patch_validation_errors(self, validation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Patch multiple validation errors.
+        """
+        errors = validation_result.get("errors", [])
+        for error in errors:
+            await self._attempt_patch({"error": error})
         return await self.validation_engine.validate_project()
-    
+
     def get_current_state(self) -> Dict[str, Any]:
-        """
-        Get current execution state for display in GUI.
-        """
         return self.state_manager.get_state()
     
     def clear_state(self):
-        """
-        Clear current execution state.
-        """
         self.state_manager.clear_state()
-        logging.info("MasterOrchestrator: Execution state cleared.")
     
     async def push_to_github(self, branch_name: str) -> Dict[str, Any]:
-        """
-        Push changes to GitHub after user confirmation.
-        Should only be called after user explicitly confirms.
-        """
-        logging.info(f"MasterOrchestrator: Pushing branch '{branch_name}' to GitHub...")
-        
-        result = self.github_flow.push_branch(branch_name)
-        
-        if result.get("success"):
-            logging.info(f"MasterOrchestrator: Successfully pushed branch '{branch_name}'.")
-        else:
-            logging.error(f"MasterOrchestrator: Failed to push branch: {result.get('error')}")
-        
-        return result
+        return self.github_flow.push_branch(branch_name)

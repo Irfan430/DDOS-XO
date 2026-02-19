@@ -20,6 +20,7 @@ from core.module_loader import ModuleLoader
 class LunaController:
     """
     The central brain of LUNA-ULTRA. Coordinates all modules and agents.
+    Refined for Professional Engineering Mode: Improved synchronization and output enforcement.
     """
     def __init__(self, config_dir: str = "config"):
         self.config_dir = config_dir
@@ -35,7 +36,7 @@ class LunaController:
         self.state_manager = StateManager()
         self.cognitive_mode = CognitiveMode()
         
-        # Advanced Features (v2.3)
+        # Advanced Features
         from agents.thought_loop import ThoughtLoop
         from core.system_health import SystemHealth
         from agents.skill_acquisition import SkillAcquisition
@@ -45,13 +46,13 @@ class LunaController:
         self.thought_loop = ThoughtLoop(self)
         self.system_health = SystemHealth(self)
         self.skill_acquisition = SkillAcquisition(self)
+        
         from core.execution_watchdog import ExecutionWatchdog
         from core.error_intelligence import ErrorIntelligence
         self.watchdog = ExecutionWatchdog(self)
         self.watchdog.start()
         self.error_intelligence = ErrorIntelligence(self)
         
-        # GitHub & Validation (v2.4)
         from core.github_manager import GitHubManager
         from core.validation_loop import ValidationLoop
         from core.task_queue import TaskQueue, CostMonitor, RiskScoringEngine
@@ -68,29 +69,17 @@ class LunaController:
         self.skill_manager = SkillManager()
         self.orchestrator = Orchestrator(self)
         
-        # Master Orchestrator & Resume Engine (v2.5)
         from core.master_orchestrator import MasterOrchestrator
         self.master_orchestrator = MasterOrchestrator(self)
         self.resume_engine = self.master_orchestrator.resume_engine
         
-        # Optional Modules (Loaded Safely)
+        # Optional Modules
         self.telegram = self.init_optional_module("automation.telegram_controller", "TelegramController", self)
         self.vision_loop = self.init_optional_module("vision.vision_loop", "VisionLoop", self)
         self.security_sentinel = self.init_optional_module("security.security_sentinel", "SecuritySentinel", self)
         
         self.system_prompt = self.load_system_prompt()
         logging.info("LunaController: Modular initialization complete.")
-        
-        # Send Startup Notification
-        if self.telegram:
-            asyncio.create_task(self.send_startup_notification())
-
-    async def send_startup_notification(self):
-        """Sends a notification to Telegram when the system starts."""
-        await asyncio.sleep(2) # Wait for initialization to settle
-        msg = "🚀 LUNA-ULTRA System Online. Agent is active and ready for commands, IRFAN."
-        await self.telegram.send_notification(msg)
-        logging.info("LunaController: Startup notification sent to Telegram.")
 
     def load_modular_configs(self) -> Dict[str, Any]:
         combined_config = {}
@@ -100,8 +89,6 @@ class LunaController:
             if os.path.exists(path):
                 with open(path, "r") as f:
                     combined_config.update(yaml.safe_load(f) or {})
-            else:
-                logging.warning(f"LunaController: Config file {cf} missing.")
         return combined_config
 
     def init_optional_module(self, module_path: str, class_name: str, *args):
@@ -114,22 +101,16 @@ class LunaController:
         return None
 
     async def start_services(self):
-        """Starts background services safely."""
         self.watchdog.start()
         if self.telegram and self.config.get("automation", {}).get("telegram", {}).get("enabled"):
             asyncio.create_task(self.telegram.run_bot())
-            # Notification is now handled in __init__ for immediate feedback
-        
         if self.vision_loop and self.config.get("features", {}).get("vision", {}).get("enabled"):
             asyncio.create_task(self.vision_loop.start())
-        
         if self.security_sentinel and self.config.get("security", {}).get("sentinel_enabled"):
             asyncio.create_task(self.security_sentinel.start())
 
     async def shutdown_services(self):
-        """Shuts down background services safely."""
-        if self.telegram:
-            await self.telegram.stop_bot()
+        if self.telegram: await self.telegram.stop_bot()
         if self.vision_loop and hasattr(self.vision_loop, 'running') and self.vision_loop.running:
             await self.vision_loop.stop()
         if self.security_sentinel and hasattr(self.security_sentinel, 'running') and self.security_sentinel.running:
@@ -138,21 +119,16 @@ class LunaController:
     def load_system_prompt(self) -> str:
         path = "config/system_prompt.txt"
         if os.path.exists(path):
-            with open(path, "r") as f:
-                return f.read()
+            with open(path, "r") as f: return f.read()
         return "You are LUNA-ULTRA, a professional AI assistant."
 
     async def process_input(self, user_input: str) -> str:
-        """Central entry point for user input."""
-        
-        # 1. Check for Token Limit Error in previous response
+        """Central entry point for user input with refined TaskResult processing."""
         if user_input.lower() == "resume" and self.master_orchestrator.state_manager.has_active_execution():
             logging.info("LunaController: Resuming previous task...")
             resume_result = await self.resume_engine.resume_execution()
             return f"Resumed: {resume_result.get('message', 'Task in progress...')}"
 
-        # 2. Normal Task Handling
-        # Register task with watchdog
         task_id = f"task_{int(time.time())}"
         self.watchdog.register_task(task_id, user_input)
         
@@ -160,113 +136,68 @@ class LunaController:
         self.watchdog.unregister_task(task_id)
         
         is_success = False
+        final_response = ""
+
         if response_data.get("type") == "chat":
-            response = response_data.get("response")
+            final_response = response_data.get("response")
             is_success = True
-            
-            # 3. Auto-detect Token Limit Error from LLM response
-            if "TOKEN_LIMIT_ERROR" in response:
-                logging.warning("LunaController: Token limit detected. Saving state for resume.")
-                await self.resume_engine.handle_token_limit_error(response)
-                return "I've hit a token limit, but I've saved my progress. Type 'resume' to continue from where I left off."
+            if "TOKEN_LIMIT_ERROR" in final_response:
+                await self.resume_engine.handle_token_limit_error(final_response)
+                return "I've hit a token limit, but I've saved my progress. Type 'resume' to continue."
         else:
-            # Handle tool execution results
-            # Priority 1: Check if ThoughtLoop returned a combined output
+            # Handle standardized tool execution results
             if "output" in response_data:
-                response = response_data["output"]
+                final_response = response_data["output"]
                 is_success = response_data.get("success", True)
-            
-            # Priority 2: Check individual results
             else:
                 results = response_data.get("results", [])
                 if results:
                     last_res = results[-1].get("result", {})
-                    output = last_res.get('output', '')
-                    is_success = last_res.get('success', False)
+                    is_success = last_res.get("status") == "success"
                     
-                    if output and output != 'Success':
-                        response = output
-                    else:
-                        message = last_res.get('message', '')
-                        error = last_res.get('error', '')
+                    if not is_success:
+                        error = last_res.get("error", "Unknown error")
+                        analysis = await self.error_intelligence.analyze_failure(user_input, error, results)
+                        final_response = f"I encountered an issue: {error}\n\n### Root Cause Analysis\n{analysis['analysis']}"
                         
-                        if error:
-                            # Error Intelligence Upgrade
-                            analysis_data = await self.error_intelligence.analyze_failure(user_input, error, results)
-                            response = f"I encountered an issue: {error}\n\n### Root Cause Analysis\n{analysis_data['analysis']}"
-                            
-                            # Voice Announcement for failure
-                            if hasattr(self, 'gui') and self.gui and self.gui.voice_engine.enabled:
-                                self.gui.voice_engine.announce_task_status(user_input, "failed", analysis_data['root_cause'])
-                        elif message:
-                            response = f"Task completed: {message}"
-                        else:
-                            summary_prompt = (
-                                f"User asked: {user_input}\n"
-                                f"The system executed these steps: {response_data.get('plan', [])}\n"
-                                f"Results: {results}\n"
-                                f"Provide a natural, conversational summary of what was accomplished."
-                            )
-                            response = await self.llm_router.generate_response(summary_prompt)
+                        if hasattr(self, 'gui') and self.gui and self.gui.voice_engine.enabled:
+                            self.gui.voice_engine.announce_task_status(user_input, "failed", analysis['root_cause'])
+                    else:
+                        final_response = last_res.get("message", "Task completed successfully.")
+                        # If there's content (like code), append it
+                        if last_res.get("content") and isinstance(last_res["content"], str) and "```" in last_res["content"]:
+                            final_response += f"\n\n**Result Content:**\n{last_res['content']}"
                 else:
-                    response = "Action performed."
+                    final_response = "Action performed successfully."
                     is_success = True
 
-        # Telegram Notification on Success (for general tasks)
-        # Ensure telegram is enabled in config
-        telegram_enabled = self.config.get("automation", {}).get("telegram", {}).get("enabled", True)
-        if is_success and self.telegram and telegram_enabled:
-            if not any(word in user_input.lower() for word in ["shutdown", "restart", "power off"]):
+        # Telegram Notification
+        if is_success and self.telegram and self.config.get("automation", {}).get("telegram", {}).get("enabled", True):
+            if not any(word in user_input.lower() for word in ["shutdown", "restart"]):
                 try:
-                    # Clean up response for notification (remove markdown blocks for better readability)
-                    clean_response = re.sub(r'```.*?```', '[Code Block]', response, flags=re.DOTALL)
-                    notify_msg = f"✅ Task Successful!\n\nTask: {user_input[:100]}...\n\nResult: {clean_response[:300]}..."
+                    clean_res = re.sub(r'```.*?```', '[Code Block]', final_response, flags=re.DOTALL)
+                    notify_msg = f"✅ Task Successful!\n\nTask: {user_input[:100]}...\n\nResult: {clean_res[:300]}..."
                     asyncio.create_task(self.telegram.send_notification(notify_msg))
-                    logging.info("LunaController: Success notification queued for Telegram.")
                 except Exception as e:
-                    logging.error(f"LunaController: Failed to send Telegram notification: {e}")
+                    logging.error(f"LunaController: Telegram notify error: {e}")
         
-        # Store in memory
-        self.memory_manager.store_interaction(user_input, response)
-        return response
+        self.memory_manager.store_interaction(user_input, final_response)
+        return final_response
 
     def update_config(self, new_config: Dict[str, Any]):
-        """
-        Updates the system configuration dynamically and reloads affected modules.
-        """
         logging.info(f"LunaController: Updating configuration: {new_config}")
-        
-        # 1. Update internal config dictionary
         for section, values in new_config.items():
-            if section not in self.config:
-                self.config[section] = {}
+            if section not in self.config: self.config[section] = {}
             self.config[section].update(values)
             
-        # 2. Update LLM Router if needed
         if "llm" in new_config:
             self.llm_router.mode = self.config["llm"].get("mode", "api")
             self.llm_router.default_provider = self.config["llm"].get("default_provider", "deepseek")
-            self.llm_router.enforce_personality = self.config["llm"].get("enforce_personality", True)
-            if "api_keys" in new_config["llm"]:
-                for provider, key in new_config["llm"]["api_keys"].items():
-                    if provider in self.llm_router.providers:
-                        self.llm_router.providers[provider].api_key = key
-        
-        # 2.1 Update Personality Engine if needed
-        if "personality" in new_config:
-            self.personality_engine.profile = self.config["personality"].get("profile", "professional")
-            self.llm_router.personality_engine.profile = self.personality_engine.profile
-        
-        # 3. Update Permission Engine if needed
+            
         if "permissions" in new_config or "security" in new_config:
             from security.permission_engine import PermissionLevel
             level_str = self.config.get("permissions", {}).get("level") or self.config.get("security", {}).get("level", "SAFE")
             self.permission_engine.current_level = PermissionLevel[level_str]
-            
-        # 4. Update Voice Engine via GUI if available
-        if "gui" in new_config and hasattr(self, 'gui') and self.gui:
-            if "voice_mode" in new_config["gui"]:
-                self.gui.voice_engine.toggle(new_config["gui"]["voice_mode"])
 
     def get_status(self) -> Dict[str, Any]:
         return {

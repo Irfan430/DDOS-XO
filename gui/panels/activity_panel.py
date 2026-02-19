@@ -8,6 +8,7 @@ import qtawesome as qta
 class LiveActivityPanel(QFrame):
     """
     LUNA-ULTRA Live Agent Activity Panel: Displays real-time execution awareness.
+    Refined for Professional Engineering Mode: Supports standardized TaskResult rendering.
     """
     def __init__(self, controller):
         super().__init__()
@@ -76,12 +77,13 @@ class LiveActivityPanel(QFrame):
         layout.addStretch()
 
     def update_activity(self, data: dict):
-        """Updates the panel with structured execution data."""
+        """Updates the panel with standardized execution data."""
         agent = data.get("agent", "IDLE")
-        task = data.get("task", "Waiting...")
+        # Handle both 'task' and 'message' for compatibility
+        task = data.get("task") or data.get("message") or "Processing..."
         confidence = data.get("confidence", 0.00)
         risk = data.get("risk_level", "LOW")
-        status = data.get("status", "pending")
+        status = data.get("status", "pending").lower()
 
         self.active_agent_lbl.setText(f"Active Agent: {agent.upper()}")
         self.current_task_lbl.setText(f"Current Task: {task}")
@@ -89,7 +91,7 @@ class LiveActivityPanel(QFrame):
         
         # Update Risk Color
         self.risk_indicator.setText(risk.upper())
-        if risk.upper() == "HIGH":
+        if risk.upper() == "HIGH" or risk.upper() == "CRITICAL":
             self.risk_indicator.setStyleSheet("font-size: 18px; font-weight: 800; color: #EF4444;")
         elif risk.upper() == "MEDIUM":
             self.risk_indicator.setStyleSheet("font-size: 18px; font-weight: 800; color: #F59E0B;")
@@ -109,8 +111,11 @@ class LiveActivityPanel(QFrame):
         elif status == "partial":
             item.setForeground(QColor("#F59E0B"))
             item.setIcon(qta.icon("fa5s.exclamation-circle", color="#F59E0B"))
+        elif status == "executing":
+            item.setForeground(QColor("#3B82F6"))
+            item.setIcon(qta.icon("fa5s.spinner", color="#3B82F6"))
         else:
-            item.setIcon(qta.icon("fa5s.spinner", color="#5850EC"))
+            item.setIcon(qta.icon("fa5s.clock", color="#5850EC"))
 
         self.timeline.insertItem(0, item)
         if self.timeline.count() > 20:

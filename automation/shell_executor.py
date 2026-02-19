@@ -1,11 +1,14 @@
 # Path: automation/shell_executor.py
 import subprocess
 import shlex
+import logging
+import asyncio
 from typing import Dict, Any
 
 class ShellExecutor:
     """
     LUNA-ULTRA Shell Executor: Executes shell commands with permission gating and security hardening.
+    Improved for better error reporting and subprocess stability.
     """
     def __init__(self, config: Dict[str, Any], permission_engine: Any):
         self.config = config
@@ -14,39 +17,69 @@ class ShellExecutor:
 
     async def execute(self, command: str, dry_run: bool = False) -> Dict[str, Any]:
         """
-        Executes a command after permission check. Avoids shell=True where possible.
+        Executes a command after permission check.
+        Uses asyncio.to_thread to prevent blocking the main event loop.
         """
         # 1. Permission Check
         if not self.permission_engine.check_permission("shell_exec", command):
-            return {"success": False, "error": "Permission Denied by LUNA Security Engine."}
+            return {
+                "success": False, 
+                "error": "Permission Denied by LUNA Security Engine.",
+                "message": "The command was blocked for security reasons."
+            }
         
         # 2. Dry-Run Mode
         if dry_run or self.config.get('dry_run', False):
-            import logging
             logging.info(f"ShellExecutor: DRY-RUN: {command}")
-            return {"success": True, "stdout": f"[DRY-RUN] Executed: {command}", "stderr": "", "returncode": 0}
+            return {
+                "success": True, 
+                "stdout": f"[DRY-RUN] Executed: {command}", 
+                "stderr": "", 
+                "returncode": 0,
+                "message": "Dry-run successful."
+            }
             
         try:
             # 3. Hardened Execution (No shell=True)
+            # shlex.split might fail for complex commands with pipes, but we enforce this for security
             args = shlex.split(command)
             
-            # Use subprocess.run with timeout to prevent hanging
-            result = subprocess.run(
+            # Use asyncio.to_thread to run the blocking subprocess.run in a separate thread
+            # this prevents the GUI/event loop from freezing
+            result = await asyncio.to_thread(
+                subprocess.run,
                 args, 
-                shell=False, # Hardened: No shell expansion
+                shell=False, 
                 capture_output=True, 
                 text=True, 
                 timeout=self.timeout
             )
+            
+            success = result.returncode == 0
             return {
-                "success": result.returncode == 0, 
+                "success": success, 
                 "stdout": result.stdout, 
                 "stderr": result.stderr,
-                "returncode": result.returncode
+                "returncode": result.returncode,
+                "message": "Execution finished." if success else f"Command failed with return code {result.returncode}"
             }
         except subprocess.TimeoutExpired:
-            return {"success": False, "error": f"Command timed out after {self.timeout} seconds."}
+            logging.error(f"ShellExecutor: Command timed out: {command}")
+            return {
+                "success": False, 
+                "error": f"Command timed out after {self.timeout} seconds.",
+                "message": "The process took too long to respond."
+            }
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "error": f"Executable not found for command: {command}",
+                "message": "Please ensure the command exists and is in the system PATH."
+            }
         except Exception as e:
-            # 4. Hardened: No shell=True fallback. Complex commands must be split or handled by Sandbox.
-            logging.error(f"ShellExecutor: Command failed or is too complex for direct execution: {e}")
-            return {"success": False, "error": f"Execution failed: {str(e)}. Complex commands (pipes/redirects) are blocked for security."}
+            logging.error(f"ShellExecutor: Execution failed: {e}")
+            return {
+                "success": False, 
+                "error": str(e),
+                "message": "An unexpected error occurred during shell execution. Complex commands (pipes/redirects) may need to be split."
+            }

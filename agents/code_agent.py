@@ -10,6 +10,7 @@ from llm.router import LLMRouter
 class CodeAgent:
     """
     LUNA-ULTRA Code Agent: Writes, executes, and self-heals code with a robust feedback loop.
+    Enforces standardized TaskResult output.
     """
     def __init__(self, config: Dict[str, Any], llm_router: LLMRouter):
         self.config = config
@@ -24,27 +25,39 @@ class CodeAgent:
             result = await self.self_healing_loop(task, params.get('initial_code', ""))
             
             # If a filename was provided, save the code to that file
-            if filename and result.get("success") and result.get("code"):
+            if filename and result.get("status") == "success" and result.get("content"):
                 try:
                     with open(filename, "w") as f:
-                        f.write(result["code"])
-                    result["output"] += f"\n\n✅ Code has been saved to `{filename}`."
+                        f.write(result["content"])
+                    result["message"] += f"\n\n✅ Code has been saved to `{filename}`."
                 except Exception as e:
-                    result["output"] += f"\n\n⚠️ Failed to save code to `{filename}`: {e}"
+                    result["message"] += f"\n\n⚠️ Failed to save code to `{filename}`: {e}"
             
             return result
-        return {"error": f"Action {action} not supported"}
+        return {
+            "status": "failed",
+            "error": f"Action {action} not supported",
+            "message": "Operation failed due to unsupported action.",
+            "execution_used": False,
+            "confidence": 0.0,
+            "risk_level": "low"
+        }
 
     def extract_code(self, text: str) -> str:
         """
         Extracts python code from markdown blocks or returns the text if no blocks found.
+        Improved to handle multiple blocks and nested formatting.
         """
-        match = re.search(r"```python\n(.*?)\n```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        match = re.search(r"```\n(.*?)\n```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        # Try to find python blocks first
+        blocks = re.findall(r"```python\n(.*?)\n```", text, re.DOTALL)
+        if blocks:
+            return "\n\n".join(blocks).strip()
+        
+        # Fallback to generic code blocks
+        blocks = re.findall(r"```\n(.*?)\n```", text, re.DOTALL)
+        if blocks:
+            return "\n\n".join(blocks).strip()
+            
         return text.strip()
 
     async def execute_code(self, code: str, language: str = "python") -> Dict[str, Any]:
@@ -83,6 +96,7 @@ class CodeAgent:
     async def self_healing_loop(self, task: str, initial_code: str) -> Dict[str, Any]:
         """
         The self-healing loop: Run -> Error -> LLM Fix -> Run again.
+        Returns standardized TaskResult.
         """
         current_code = initial_code
         history = []
@@ -104,16 +118,15 @@ class CodeAgent:
             result = await self.execute_code(current_code)
             
             if result["success"]:
-                final_output = (
-                    f"I have written and verified the code for you, IRFAN.\n\n"
-                    f"```python\n{current_code}\n```\n\n"
-                    f"**Execution Output:**\n```\n{result['stdout']}\n```"
-                )
+                message = f"I have written and verified the code for you, IRFAN.\n\n**Execution Output:**\n```\n{result['stdout']}\n```"
                 return {
-                    "success": True, 
-                    "attempt": attempt,
-                    "code": current_code, 
-                    "output": final_output
+                    "status": "success",
+                    "content": current_code,
+                    "message": message,
+                    "execution_used": True,
+                    "confidence": 0.98,
+                    "risk_level": "medium",
+                    "attempt": attempt
                 }
             
             error_msg = result.get("stderr") or result.get("error")
@@ -134,15 +147,17 @@ class CodeAgent:
                 break
                 
         # Even if it fails, return the code so the user can see it
-        fail_output = (
-            f"I tried to write the code but encountered some issues during execution, IRFAN.\n\n"
-            f"**Last Code Attempt:**\n```python\n{current_code}\n```\n\n"
+        fail_message = (
+            f"I tried to write the code but encountered issues during execution, IRFAN.\n\n"
             f"**Error:**\n{history[-1]['error']}"
         )
         return {
-            "success": False, 
-            "error": "Max retries reached without success.", 
-            "history": history,
-            "last_code": current_code,
-            "output": fail_output
+            "status": "failed",
+            "content": current_code,
+            "error": history[-1]['error'],
+            "message": fail_message,
+            "execution_used": True,
+            "confidence": 0.4,
+            "risk_level": "medium",
+            "history": history
         }
