@@ -96,6 +96,23 @@ class MemoryManager:
 
         return "\n".join(context_parts)
 
+    def add_memory(self, role: str, content: str):
+        """FIXED BUG-007: Alias for store_interaction() for compatibility with external code.
+        
+        Args:
+            role: 'user' or 'assistant'/'luna'
+            content: The message content
+        """
+        if role in ('user', 'human'):
+            self.store_interaction(content, "")
+        else:
+            # For assistant messages, update the last entry's luna field
+            if self.memory_data:
+                self.memory_data[-1]["luna"] = content
+                self.save_memory()
+            else:
+                self.store_interaction("", content)
+
     def cleanup_old_memory(self):
         cutoff_date = datetime.now() - timedelta(days=self.rolling_days)
         self.memory_data = [

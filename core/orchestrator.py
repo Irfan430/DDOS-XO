@@ -79,6 +79,16 @@ class Orchestrator:
             self.controller.gui.update_activity(f"🧠 THOUGHT: {thought}")
 
         # 2. Routing Logic
+        # FIXED: BUG-009 - Handle GREETING intent explicitly with a warm, direct response
+        if intent == "GREETING":
+            greeting_prompt = (
+                f"{self.controller.system_prompt}\n\n"
+                f"The user just greeted you. Respond warmly and briefly as LUNA.\n"
+                f"User: {user_input}"
+            )
+            greeting_response = await self.controller.llm_router.generate_response(greeting_prompt)
+            return {"response": greeting_response, "type": "greeting", "thought": thought}
+
         action_intents = ["CODING", "SYSTEM_ACTION", "WEB_ACTION", "AUTOMATION", "ANALYSIS"]
         if intent not in action_intents:
             chat_prompt = (
